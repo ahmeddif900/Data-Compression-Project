@@ -31,85 +31,173 @@ def conversion_function(image):
     
     except Exception as e:
         raise Exception(f"Error in conversion_function: {str(e)}")
-
-def non_uniform_scalar_decompression(pixel_array, max_iterations=10):
+def non_uniform_scalar_decompression(pixel_array, mode="iterations", max_iterations=20):
     """Find Q^-1 values through clustering (non-uniform quantization)"""
+    
     # Start with all pixels in one cluster
     clusters = {-1: np.arange(len(pixel_array))}  # Initially all pixels in one cluster
     
     iteration = 0
     previous_centers = set()
+    previous_clusters = None
+    iteration_details = []
+    quality_history = []
+    
+    if mode == "iterations":
+        # Mode 1: Fixed number of iterations
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            new_clusters, current_centers, details = _perform_clustering_iteration(
+                clusters, pixel_array, iteration
+            )
+            
+            iteration_details.extend(details)
+            
+            # Check convergence: if centers haven't changed, stop
+            if current_centers == previous_centers:
+                break
+            
+            previous_centers = current_centers
+            clusters = new_clusters
+        
+        # Extract Q^-1 values (sorted cluster centers)
+        q_inverse_values = np.array(sorted(current_centers))
+        
+        return q_inverse_values, iteration_details, iteration
+    
+    elif mode == "quality":
+        # Mode 2: Find best quality based on criteria
+        
+        best_q_inverse = None
+        best_metrics = None
+        best_iteration = 0
+        best_clusters = None
+        
+        while iteration < max_iterations:
+            iteration += 1
+            
+            new_clusters, current_centers, details = _perform_clustering_iteration(
+                clusters, pixel_array, iteration
+            )
+            
+            iteration_details.extend(details)
+                
+            # Extract current Q^-1 values
+            current_q_inverse = np.array(sorted(current_centers))
+            # Stop when clusters don't change significantly
+            if _check_convergence(clusters, new_clusters, pixel_array) :
+                best_q_inverse = current_q_inverse
+                best_iteration = iteration
+                best_clusters = new_clusters
+                break
+            
+            # Update for next iteration
+            previous_centers = current_centers
+            clusters = new_clusters
+        
+        # If loop ended without triggering stop condition, use best found
+        if best_q_inverse is None and len(current_centers) > 0:
+            best_q_inverse = np.array(sorted(current_centers))
+            best_metrics = quality_history[-1] if quality_history else None
+            best_iteration = iteration
+        
+        
+        return best_q_inverse, iteration_details, best_iteration
+def _perform_clustering_iteration(clusters, pixel_array, iteration_num):
+    """Perform one iteration of clustering"""
+    new_clusters = {}
+    current_centers = set()
     iteration_details = []
     
-    while iteration < max_iterations:
-        iteration += 1
+    for center, indices in clusters.items():
+        if len(indices) == 0:
+            continue
         
-        new_clusters = {}
-        current_centers = set()
+        # Get pixel values for this cluster
+        cluster_values = pixel_array[indices]
         
-        for center, indices in clusters.items():
-            if len(indices) == 0:
-                continue
+        # Calculate average
+        avg = np.mean(cluster_values)
+        
+        # Determine floor and ceil
+        if iteration_num == 1 and avg == int(avg):
+            # Special case: first iteration with integer average
+            floor_val = int(avg) - 1
+            ceil_val = int(avg) + 1
+        else:
+            floor_val = int(np.floor(avg))
+            ceil_val = int(np.ceil(avg))
+        
+        # Store iteration details for display
+        iteration_details.append({
+            'iteration': iteration_num,
+            'cluster_size': len(indices),
+            'average': avg,
+            'floor': floor_val,
+            'ceil': ceil_val
+        })
+        
+        # If floor == ceil (integer average after first iteration), no split
+        if floor_val == ceil_val and iteration_num > 1:
+            new_clusters[floor_val] = indices
+            current_centers.add(floor_val)
+        else:
+            # Split based on distance to floor and ceil
+            midpoint = (floor_val + ceil_val) / 2
             
-            # Get pixel values for this cluster
-            cluster_values = pixel_array[indices]
+            # Vectorized classification
+            mask_floor = cluster_values < midpoint
+            mask_ceil = ~mask_floor
             
-            # Calculate average
-            avg = np.mean(cluster_values)
+            indices_floor = indices[mask_floor]
+            indices_ceil = indices[mask_ceil]
             
-            # Determine floor and ceil
-            if iteration == 1 and avg == int(avg):
-                # Special case: first iteration with integer average
-                floor_val = int(avg) - 1
-                ceil_val = int(avg) + 1
-            else:
-                floor_val = int(np.floor(avg))
-                ceil_val = int(np.ceil(avg))
-            
-            # Store iteration details for display
-            iteration_details.append({
-                'iteration': iteration,
-                'cluster_size': len(indices),
-                'average': avg,
-                'floor': floor_val,
-                'ceil': ceil_val
-            })
-            
-            # If floor == ceil (integer average after first iteration), no split
-            if floor_val == ceil_val and iteration > 1:
-                new_clusters[floor_val] = indices
+            if len(indices_floor) > 0:
+                new_clusters[floor_val] = indices_floor
                 current_centers.add(floor_val)
-            else:
-                # Split based on distance to floor and ceil
-                midpoint = (floor_val + ceil_val) / 2
-                
-                # Vectorized classification
-                mask_floor = cluster_values < midpoint
-                mask_ceil = ~mask_floor
-                
-                indices_floor = indices[mask_floor]
-                indices_ceil = indices[mask_ceil]
-                
-                if len(indices_floor) > 0:
-                    new_clusters[floor_val] = indices_floor
-                    current_centers.add(floor_val)
-                
-                if len(indices_ceil) > 0:
-                    new_clusters[ceil_val] = indices_ceil
-                    current_centers.add(ceil_val)
-        
-        # Check convergence: if centers haven't changed, stop
-        if current_centers == previous_centers:
-            break
-        
-        previous_centers = current_centers
-        clusters = new_clusters
+            
+            if len(indices_ceil) > 0:
+                new_clusters[ceil_val] = indices_ceil
+                current_centers.add(ceil_val)
     
-    # Extract Q^-1 values (sorted cluster centers)
-    q_inverse_values = np.array(sorted(current_centers))
-    
-    return q_inverse_values, iteration_details, iteration
+    return new_clusters, current_centers, iteration_details
 
+def _check_convergence(old_clusters, new_clusters, pixel_array, threshold=0.01):
+    """
+    Fast convergence check based on cluster centers
+    O(k) where k = number of clusters (typically << number of pixels)
+    """
+    if old_clusters is None:
+        return False
+    
+    # Get cluster centers
+    old_centers = set(old_clusters.keys())
+    new_centers = set(new_clusters.keys())
+    
+    # Remove the initial -1 center if present
+    old_centers.discard(-1)
+    new_centers.discard(-1)
+    
+    # Method 1: Check if center sets are identical (simplest)
+    if old_centers == new_centers:
+        return True
+    
+    # Method 2: Check if centers are close (within threshold)
+    old_centers_list = sorted(old_centers)
+    new_centers_list = sorted(new_centers)
+    
+    # If number of centers changed, not converged
+    if len(old_centers_list) != len(new_centers_list):
+        return False
+    
+    # Check if each center moved less than threshold
+    for old_center, new_center in zip(old_centers_list, new_centers_list):
+        if abs(old_center - new_center) > threshold:
+            return False
+    
+    return True
 def non_uniform_scalar_compression(pixel_array, q_inverse_values, full_scale=255, bit_depth=8):
     """Build quantization table and quantize pixels"""
     # Calculate levels number

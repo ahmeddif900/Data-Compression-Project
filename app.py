@@ -19,9 +19,9 @@ from rle_golomb import rle_golomb_encoding, rle_golomb_decoding
 from lzw import LZW_encoding, LZW_decoding
 
 # Import image compression methods
-from image_quantization import (
-    quantize_color_image_fast, 
-    reconstruct_color_image_fast,
+from uniform_quantizer import (
+    quantize_color_image, 
+    reconstruct_color_image,
 )
 from non_uniform_quantizer import (
         conversion_function,
@@ -133,50 +133,7 @@ def get_compressed_size(compressed_data):
         return len(compressed_data) * 2  # Approximate: 2 bytes per code
     else:
         return 0
-def apply_non_uniform_quantization(image, bit_depth, full_scale, max_iterations):
-    """Apply non-uniform quantization to image"""
-    # Convert to grayscale and flatten
-    flattened_pixels, original_shape, grayscale_img = conversion_function(image)
-    
-    # Find Q^-1 values (clustering)
-    q_inverse_values, iteration_details, num_iterations = non_uniform_scalar_decompression(
-        flattened_pixels, max_iterations
-    )
-    
-    # Build quantization table and compress
-    quantized_pixels, quant_table, fs, bd, q_inv = non_uniform_scalar_compression(
-        flattened_pixels, q_inverse_values, full_scale, bit_depth
-    )
-    
-    # Decompress/reconstruct image
-    decompressed_img, decompressed_array = uniform_scalar_decompression(
-        quantized_pixels, quant_table, original_shape
-    )
-    
-    # Calculate metrics
-    mse = calculate_MSE(flattened_pixels, quantized_pixels, quant_table)
-    psnr = calculate_psnr(mse)
-    cr_info = calculate_compression_ratio(quant_table)
-    table_stats = analyze_quantization_table(quant_table)
-    
-    metrics = {
-        'mse': mse,
-        'psnr': psnr,
-        'compression_ratio': cr_info,
-        'table_stats': table_stats,
-        'q_inverse_values': q_inv,
-        'bit_depth': bd,
-        'levels': 2 ** bd,
-        'full_scale': fs,
-        'num_iterations': num_iterations,
-        'iteration_details': iteration_details,
-        'quantization_table': quant_table,
-        'q_inverse_values_raw': q_inverse_values,
-        'original_pixels': flattened_pixels,
-        'quantized_pixels': quantized_pixels
-    }
-    
-    return decompressed_img, decompressed_array, quantized_pixels, metrics, grayscale_img
+
 # Main area
 st.header("Input Data")
 if compression_type == "Lossless Compression":
@@ -774,13 +731,10 @@ else:  # Lossy Compression - Image Quantization
     # Algorithm selection
     if lossy_algorithm == "Uniform Scalar Quantization":
         st.session_state.algorithm_type = "Uniform Scalar Quantization"
-        algorithm_desc = "Uniform quantization uses equal-sized intervals"
     else:
         st.session_state.algorithm_type = "Non-Uniform Scalar Quantization"
-        algorithm_desc = "Non-uniform quantization adapts to image content"
     
     st.write(f"**Algorithm:** {st.session_state.algorithm_type}")
-    st.write(f"**Description:** {algorithm_desc}")
     
     # Upload image section
     st.subheader("1. Upload Image File")
@@ -790,7 +744,86 @@ else:  # Lossy Compression - Image Quantization
         type=['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'gif'],
         key="image_upload"
     )
-    
+    # Algorithm info
+    with st.expander(" Algorithm Information"):
+        if lossy_algorithm == "Uniform Scalar Quantization":
+            st.markdown("""
+        **Uniform Scalar Quantization:**
+        
+        **How it Works:**
+        1. **Color Space Division:** The 0-255 intensity range for each RGB channel is divided into equal intervals
+        2. **Mapping:** Each pixel value is mapped to the nearest quantization level
+        3. **Representation:** Quantized values are stored using fewer bits
+        4. **Reconstruction:** During decompression, quantized values are mapped back to representative values
+        
+        **Mathematical Process:**
+        - Input range: [0, 255]
+        - Quantization levels: 2^bit_depth
+        - Step size: Δ = 256 / levels
+        
+        **Key Features:**
+        -  **Simple and Fast:** Equal spacing makes computation efficient
+        -  **Predictable:** Fixed step size for all images
+        -  **Consistent:** Same quality across different image regions
+        -  **Inefficient:** Wastes bits on rarely used intensity values
+        -  **Poor Adaptation:** Doesn't consider image content distribution
+        
+        **Best For:**
+        - Images with uniform intensity distribution
+        - Real-time applications requiring speed
+        - Situations where computational simplicity is prioritized
+        
+        **Compression Effect:**
+        - Reduces color palette from 16.7 million (24-bit) to smaller sets
+        - Creates "banding" artifacts in smooth gradients
+        - Preserves edges well but may lose subtle color variations
+        """)
+        
+        else:  # Non-Uniform Scalar Quantization
+            st.markdown("""
+        **Non-Uniform Scalar Quantization:**
+
+        **How it Works:**
+        1. **Histogram Analysis:** Analyzes pixel intensity distribution in the image
+        2. **Clustering:** Groups similar intensity values using iterative clustering
+        3. **Adaptive Levels:** Places more quantization levels where pixels are concentrated
+        4. **Variable Step Sizes:** Uses smaller steps in dense regions, larger steps in sparse regions
+        
+        **Mathematical Process:**
+        - Initial: All pixels in one cluster
+        - Iteration: Split clusters based on mean values
+        - Convergence: Stop when cluster centers stabilize or max iterations reached
+        - Lloyd-Max Algorithm: Minimizes mean squared error through iterative refinement
+        
+        **Key Features:**
+        -  **Adaptive:** Tailors quantization to image content
+        -  **Efficient:** Uses bits where they matter most
+        -  **Better Quality:** Preserves important intensity ranges
+        -  **Reduced Banding:** Smoother gradients than uniform quantization
+        -  **Slower:** Requires iterative processing
+        -  **Complex:** More computation and memory needed
+        
+        **Clustering Algorithm:**
+        1. **Initialization:** Start with all pixels as one cluster
+        2. **Split:** Divide clusters at calculated midpoints
+        3. **Refine:** Recalculate cluster centers
+        4. **Repeat:** Until desired number of levels or convergence
+        
+        **Best For:**
+        - Images with concentrated intensity ranges (e.g., portraits, landscapes)
+        - Applications where quality is critical
+        - Images with important subtle variations
+        - Professional photography and medical imaging
+        
+        **Visual Difference:**
+        - **Uniform:** Equal spacing → may miss important intensity clusters
+        - **Non-Uniform:** Adaptive spacing → follows actual pixel distribution
+        
+        **Quality vs Compression Trade-off:**
+        - Higher iterations → Better adaptation → Better quality
+        - More levels → Better quality → Less compression
+        - Adaptive design → Better PSNR for same bitrate compared to uniform
+        """)
     if uploaded_file:
         try:
             # Display original image
@@ -801,7 +834,7 @@ else:  # Lossy Compression - Image Quantization
             col1, col2 = st.columns(2)
             
             with col1:
-                st.image(image, caption=f"Original: {file_name}", use_column_width=True)
+                st.image(image, caption=f"Original: {file_name}", use_container_width=True)
             
             with col2:
                 st.write("**Image Information:**")
@@ -824,14 +857,32 @@ else:  # Lossy Compression - Image Quantization
                     value=4 if st.session_state.algorithm_type == "Non-Uniform Scalar Quantization" else 6,
                     help="Lower values = more compression but lower quality"
                 )
-                
                 if st.session_state.algorithm_type == "Non-Uniform Scalar Quantization":
-                    max_iterations = st.slider(
-                        "Maximum iterations for clustering:",
-                        min_value=1,
-                        max_value=20,
-                        value=10
+                    # Mode selection
+                    quantization_mode = st.selectbox(
+                        "Quantization Mode:",
+                        ["Quality Optimization", "Fixed Iterations"]
                     )
+                    if quantization_mode == "Fixed Iterations":
+                        max_iterations = st.slider(
+                            "Maximum iterations:",
+                            min_value=1,
+                            max_value=20,
+                            value=10,
+                            help="More iterations = better adaptation but slower"
+                        )
+                        mode = "iterations"
+                    else:
+                        convergence_threshold = st.slider(
+                            "Convergence threshold (%):",
+                            min_value=.01,
+                            max_value=5.0,
+                            value=2.0,
+                            help="Stop when less than this % of pixels change clusters"
+                        )
+                        max_iterations = 40
+                        mode = "quality"
+                        
             
             with col2:
                 # Compression prediction
@@ -842,7 +893,6 @@ else:  # Lossy Compression - Image Quantization
                 
                 st.metric("Predicted Compression", f"{compression_ratio:.1f}:1")
                 st.metric("Predicted Size Reduction", f"{size_reduction:.1f}%")
-                st.metric("New Bit Depth", f"{compressed_bpp} bpp")
             
             # Apply compression button
             st.subheader("3.  Apply Compression")
@@ -856,8 +906,8 @@ else:  # Lossy Compression - Image Quantization
                         img_array = np.array(image.convert('RGB'), dtype=np.float32)
                         
                         # Apply uniform quantization
-                        quantized_channels, q_table = quantize_color_image_fast(img_array, bit_depth)
-                        recon_img, recon_array = reconstruct_color_image_fast(
+                        quantized_channels, q_table = quantize_color_image(img_array, bit_depth)
+                        recon_img, recon_array = reconstruct_color_image(
                             quantized_channels, q_table, img_array.shape
                         )
                         
@@ -874,10 +924,10 @@ else:  # Lossy Compression - Image Quantization
                         
                         # Find Q^-1 values
                         q_inverse_values, iteration_details, num_iterations = non_uniform_scalar_decompression(
-                            flattened_pixels, max_iterations
+                        flattened_pixels,mode=mode,max_iterations=max_iterations
                         )
                         
-                        # **FIX: Ensure pixel values are integers for indexing**
+                        # : Ensure pixel values are integers for indexing
                         flattened_pixels_int = flattened_pixels.astype(np.int32)
                         
                         # Compress
@@ -925,11 +975,10 @@ else:  # Lossy Compression - Image Quantization
                 # Display comparison
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.image(st.session_state.original_image, caption="Original", use_column_width=True)
+                    st.image(st.session_state.original_image, caption="Original", use_container_width=True)
                 with col2:
                     st.image(st.session_state.quantized_image, 
-                            caption=f"Compressed ({st.session_state.bit_depth}-bit)", 
-                            use_column_width=True)
+                            caption=f"Compressed ({st.session_state.bit_depth}-bit)", use_container_width=True)
                 
                 # Display metrics
                 metrics = st.session_state.compression_metrics
@@ -993,6 +1042,48 @@ else:  # Lossy Compression - Image Quantization
     
     else:
         st.info(" Please upload an image file to begin lossy compression")
+    st.markdown("---")
+
+    with st.expander(" Comparison "):
+        st.markdown("""
+        **Comparison Table:**
+        
+        | Feature | Uniform Quantization | Non-Uniform Quantization |
+        |---------|---------------------|-------------------------|
+        | **Speed** |  Very Fast |  Slower |
+        | **Quality** |  Moderate |  Better |
+        | **Complexity** |  Simple |  Complex |
+        | **Best For** | Real-time, uniform images | Quality-critical, varied images |
+        | **Banding Artifacts** | More noticeable | Reduced |
+        | **Memory Usage** | Lower | Higher |
+        """)
+            # Add metrics explanation
+    with st.expander(" Compression Metrics "):
+        st.markdown("""
+        **Understanding Compression Metrics:**
+        
+        **PSNR (Peak Signal-to-Noise Ratio):**
+        - Higher = Better quality
+        - \>40 dB: Excellent (near lossless)
+        - 30-40 dB: Good (minor quality loss)
+        - 20-30 dB: Acceptable (noticeable loss)
+        - <20 dB: Poor (severe degradation)
+        
+        **MSE (Mean Squared Error):**
+        - Lower = Better quality
+        - Measures average squared difference between original and compressed
+        
+        **Compression Ratio:**
+        - Ratio = Original Size / Compressed Size
+        - Higher = More compression
+        - Example: 4:1 = File is 25% of original size
+        
+        **Bit Depth:**
+        - Original: 8 bits/channel = 256 levels
+        - 6-bit: 64 levels (75% reduction)
+        - 4-bit: 16 levels (87.5% reduction)
+        - 2-bit: 4 levels (93.75% reduction)
+        """)
 # Footer
 st.markdown("---")
 st.caption("Data Compression Project | All algorithms implemented from scratch | Streamlit Application")
